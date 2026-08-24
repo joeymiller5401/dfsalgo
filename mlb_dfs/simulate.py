@@ -22,6 +22,8 @@ conditioned than one slate-wide matrix.
 
 import numpy as np
 
+from .distributions import P85_P15_SPAN, lognormal_params, role_defaults
+
 # Within-game correlations, expressed on the copula (i.e. rank correlation).
 # Because the lognormal transform is monotonic but non-linear, realized
 # *Pearson* correlation comes out somewhat lower than these numbers, while
@@ -32,17 +34,6 @@ RHO_PITCHER_VS_OPP_HITTER = -0.30   # your pitcher dealing means their bats don'
 RHO_PITCHER_OWN_HITTERS = 0.08  # run support -> wins, and wins score points
 RHO_OPPOSING_PITCHERS = -0.15
 
-# Marginal shape defaults when a projections file has no Ceiling/Floor.
-DEFAULT_CV_HITTER = 0.85
-DEFAULT_CV_PITCHER = 0.45
-
-# Lognormals are positive; shifting lets pitchers post negative scores.
-HITTER_SHIFT = 0.0
-PITCHER_SHIFT = -5.0
-
-# For a normal, the p85-p15 span is ~2.07 sigma. Used to back a standard
-# deviation out of a ceiling/floor pair.
-_P85_P15_SPAN = 2.07
 
 
 def _marginal_params(pool):
@@ -52,21 +43,12 @@ def _marginal_params(pool):
     floor = pool["floor"].to_numpy(dtype=float)
     is_p = pool["is_pitcher"].to_numpy(dtype=bool)
 
-    std = (ceiling - floor) / _P85_P15_SPAN
+    cv, shift = role_defaults(is_p)
+    std = (ceiling - floor) / P85_P15_SPAN
     # No usable spread (missing ceiling/floor) -> fall back to a default CV.
-    cv = np.where(is_p, DEFAULT_CV_PITCHER, DEFAULT_CV_HITTER)
-    fallback = np.abs(proj) * cv
-    std = np.where(std > 1e-6, std, fallback)
-    std = np.maximum(std, 1e-3)
+    std = np.where(std > 1e-6, std, np.abs(proj) * cv)
 
-    shift = np.where(is_p, PITCHER_SHIFT, HITTER_SHIFT)
-    centered = proj - shift
-    # Guard against a non-positive mean after shifting.
-    centered = np.maximum(centered, 1e-3)
-
-    var_ratio = 1.0 + (std ** 2) / (centered ** 2)
-    sigma = np.sqrt(np.log(var_ratio))
-    mu = np.log(centered) - 0.5 * sigma ** 2
+    mu, sigma = lognormal_params(proj, std, shift)
     return shift, mu, sigma
 
 

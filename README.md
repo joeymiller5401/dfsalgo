@@ -24,50 +24,81 @@ Every lineup it produces is one DraftKings will accept on upload:
 pip install -r requirements.txt
 ```
 
-## What you need to provide
+## The two files you need
 
-**1. Your DK salary export.** On DraftKings, open the contest's lineup page and
-click "Export to CSV."
+**1. Your DK salary export** — on DraftKings, open the contest's lineup page and
+click "Export to CSV." This is the only source of **player IDs** (required for
+bulk upload), **multi-position eligibility**, and the authoritative salaries.
 
-**2. Your projections CSV**, one row per player:
+**2. A projections file** — what your DK export cannot tell you: who is
+actually in today's lineup, and how today's matchup changes things.
 
-```
-Name,Proj,Ceiling,Floor,Ownership,Team,Order
-Aaron Judge,11.2,24.1,3.4,28.5,NYY,2
-```
+These are not interchangeable. The DK export's `AvgPointsPerGame` is a *season
+average*, and optimizing on it will roster players who aren't playing — a
+guaranteed zero. The optimizer specifically hunts cheap players with good
+numbers, which is exactly where benched players sit. On the included sample
+slate, building from `AvgPointsPerGame` alone puts **2 benched players in a
+10-man lineup.**
 
-Only `Name` and `Proj` are required. The rest unlock more:
+### Projection file formats
 
-| Column | Unlocks |
+Column names are matched by alias, so most sources work with no preprocessing.
+A [Daily Fantasy Fuel](https://www.dailyfantasyfuel.com) MLB cheatsheet works
+as-is — see `sample_data/dff_cheatsheet_sample.csv`.
+
+| What it means | Accepted column names |
 |---|---|
-| `Ceiling`, `Floor` | GPP/cash objectives, and the spread used by the simulator |
-| `Ownership` | `--ownership-leverage` for contrarian builds |
-| `Team` | **Correctly separating two players with the same name** |
-| `Order` | `--max-batting-order` to cut 8- and 9-hole hitters |
+| Player name | `Name`, `Player`, or `first_name` + `last_name` |
+| Projection **(required)** | `Proj`, `Projection`, `FPTS`, `Points`, `ppg_projection` |
+| Ceiling / floor | `Ceiling`, `Floor` |
+| Ownership | `Ownership`, `Own%`, `ownership_projection` |
+| Team | `Team`, `TeamAbbrev` |
+| Batting order | `Order`, `Batting Order`, `confirmed_order` |
+| Injury | `injury_status`, `Status` |
+| Confirmed starter | `starting_pitcher` |
+| Vegas implied runs | `implied_team_score`, `team_total` |
+| Recent form | `L5_fppg_avg`, `L10_fppg_avg`, `szn_fppg_avg` |
+
+Only a name and a projection are required. Everything else unlocks more.
 
 > **Include `Team` if you can.** MLB slates routinely carry two players with the
 > same name. Without a team to disambiguate, one player's projection gets
 > attached to the other. This tool refuses to guess — it drops them and tells
 > you — but a `Team` column just fixes it.
 
-Sample files are in `sample_data/` so you can try it immediately.
+### If your source has no ceiling/floor
+
+Many cheatsheets (DFF included) give a point projection and nothing else. Left
+alone, that makes `--mode gpp` and `--mode cash` **silently identical to
+`balanced`**, since both objectives fall back to the same number.
+
+So the loader derives them: the 85th/15th percentile of the same shifted
+lognormal the simulator uses, with spread from a role-typical coefficient of
+variation, widened for players whose recent-form averages disagree with each
+other. It tells you when it does this.
+
+That form signal is a rough proxy — an L5 average is noisier than a season
+average by construction, so some of the dispersion is sampling noise rather
+than real volatility. It ranks players sensibly; don't read it as precise. If
+your source supplies real ceiling and floor numbers, those always win.
 
 ## Quick start
 
 ```bash
 # One safe cash lineup (maximize floor)
 python dfs_optimizer.py \
-  --dk-salaries sample_data/dk_salaries_sample.csv \
-  --projections sample_data/projections_sample.csv \
+  --dk-salaries sample_data/dk_salaries_20260824.csv \
+  --projections sample_data/dff_cheatsheet_sample.csv \
   --mode cash --output cash_lineup.csv
 
-# 20 GPP lineups: solver-chosen 4-man stack + 3-man bring-back,
-# ranked by simulated upside, nobody in more than half the lineups
+# 20 GPP lineups: solver-chosen 4-man stack + 3-man bring-back, confirmed
+# lineups only, ranked by simulated upside
 python dfs_optimizer.py \
-  --dk-salaries sample_data/dk_salaries_sample.csv \
-  --projections sample_data/projections_sample.csv \
+  --dk-salaries sample_data/dk_salaries_20260824.csv \
+  --projections sample_data/dff_cheatsheet_sample.csv \
   --mode gpp --num-lineups 20 \
-  --stack-size 4 --secondary-stack-size 3 \
+  --stack-size 4 --secondary-stack-size 3 --stack-min-implied 4.5 \
+  --require-confirmed-order \
   --rank-by p90 --max-exposure 0.5 --min-unique 4 \
   --output gpp_lineups.csv --summary-csv summary.csv
 ```
@@ -76,6 +107,30 @@ python dfs_optimizer.py \
 each cell `Name (ID)` — so it can be fed straight into DK's "Bulk Upload" entry
 screen. Stats live in `--summary-csv` and `--exposure-csv`, because extra
 columns can trip DK's importer.
+
+## Who is actually playing
+
+The highest-value thing a projections file gives you. All of these are no-ops if
+your source doesn't carry the relevant column.
+
+| Flag | Effect |
+|---|---|
+| *(default)* | Drops players listed `OUT`/`IL`; keeps and flags `DTD` |
+| `--require-confirmed-order` | Only use hitters with a confirmed batting order |
+| *(default)* | Drops pitchers not listed as today's starter |
+| `--include-injured` | Keep `OUT`/`IL` players anyway |
+| `--allow-non-starting-pitchers` | Keep unconfirmed pitchers |
+| `--max-batting-order 6` | Cut 7-8-9 hitters |
+
+## Running without a projections file
+
+```bash
+python dfs_optimizer.py --dk-salaries DKSalaries.csv --mode balanced
+```
+
+Falls back to DK's `AvgPointsPerGame`. This is a **smoke test, not a strategy** —
+it cannot know who is playing, ignores matchup entirely, and every entrant in the
+contest has the same numbers. It prints a warning saying so.
 
 ## Modes
 
@@ -92,13 +147,14 @@ correlated, so when a team puts up nine runs, four of your hitters cash at once.
 
 ```bash
 --stack-size 4                    # 4 hitters from one team; solver picks which
---stack-size 4 --stack-team NYY   # ...or force the team yourself
+--stack-size 4 --stack-team CHC   # ...or force the team yourself
 --secondary-stack-size 3          # plus 3 from a second team (the bring-back)
+--stack-min-implied 4.5           # only stack offenses Vegas likes
 ```
 
 Leaving `--stack-team` off is usually better: the solver evaluates every team's
 stack against salary and the rest of the pool, which is a decision it's better
-at than you are.
+at than you are. `--stack-min-implied` applies to both halves of a double stack.
 
 ## Building a portfolio
 
@@ -119,8 +175,8 @@ game outcomes rather than a single ceiling number.
 
 The model is a **Gaussian copula with shifted-lognormal marginals**:
 
-- Each player's marginal is matched to their projected mean and to the spread
-  implied by their `Ceiling`/`Floor`, and stays right-skewed like real scoring.
+- Each player's marginal is matched to their projected mean and spread, and
+  stays right-skewed like real scoring.
 - Correlations apply **within a game**, which is where they exist:
 
 | Relationship | Correlation | Why |
@@ -174,7 +230,8 @@ python -m pytest
 
 The suite asserts that every generated lineup satisfies each DK roster rule, and
 covers the data-loading traps that cause silent, wrong output — real DK exports
-listing pitchers as `SP`/`RP`, accented names, and same-name players.
+listing pitchers as `SP`/`RP`, accented names, same-name players, blank
+ownership columns, and missing ceiling/floor.
 
 ## Performance
 
@@ -188,7 +245,7 @@ that `--rank-by` with `--oversample 3` solves 3× the lineups you asked for, so
   equity model: simulate the field's lineups too, and optimize for expected
   payout rather than expected points. This is the biggest remaining gap.
 - **Batting-order correlation** — consecutive hitters (3-4-5) correlate more
-  tightly than a 2-hole and an 8-hole. The `Order` column is loaded already.
+  tightly than a 2-hole and an 8-hole. The order data is already loaded.
 - **Park and weather factors** — scale team run environments before simulating.
 - **Late swap** — re-run with locked players for games already started and a
   trimmed pool for the rest.

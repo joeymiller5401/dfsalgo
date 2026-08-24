@@ -35,7 +35,7 @@ import sys
 
 import pandas as pd
 
-from mlb_dfs.data import load_pool
+from mlb_dfs.data import filter_availability, load_pool
 from mlb_dfs.optimizer import Constraints, generate_lineups
 from mlb_dfs.output import exposures, summarize, to_upload_dataframe
 from mlb_dfs.simulate import lineup_metrics, score_lineups, select_portfolio, simulate_players
@@ -47,7 +47,9 @@ def build_parser():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     ap.add_argument("--dk-salaries", required=True, help="Path to DK salary export CSV")
-    ap.add_argument("--projections", required=True, help="Path to your projections CSV")
+    ap.add_argument("--projections", default=None,
+                    help="Path to your projections CSV. If omitted, falls back to DK's "
+                         "AvgPointsPerGame - a season average, not a projection.")
     ap.add_argument("--mode", choices=["cash", "gpp", "balanced"], default="balanced",
                     help="cash=max floor, gpp=max ceiling, balanced=max projection")
     ap.add_argument("--num-lineups", type=int, default=1)
@@ -65,6 +67,14 @@ def build_parser():
     roster.add_argument("--max-batting-order", type=int, default=None,
                         help="Drop hitters batting below this spot (needs an Order column)")
 
+    avail = ap.add_argument_group("who is actually playing")
+    avail.add_argument("--include-injured", action="store_true",
+                       help="Keep players listed OUT/IL (they are dropped by default)")
+    avail.add_argument("--require-confirmed-order", action="store_true",
+                       help="Only use hitters with a confirmed batting order")
+    avail.add_argument("--allow-non-starting-pitchers", action="store_true",
+                       help="Keep pitchers not listed as today's starter")
+
     stacking = ap.add_argument_group("stacking")
     stacking.add_argument("--stack-size", type=int, default=0,
                           help="Hitters required from the primary stack team")
@@ -72,6 +82,9 @@ def build_parser():
                           help="Force the stack onto one team; omit to let the solver choose")
     stacking.add_argument("--secondary-stack-size", type=int, default=0,
                           help="Hitters required from a second team (the bring-back)")
+    stacking.add_argument("--stack-min-implied", type=float, default=None,
+                          help="Only stack teams with at least this Vegas implied run "
+                               "total (needs an implied_team_score column)")
 
     portfolio = ap.add_argument_group("portfolio shape")
     portfolio.add_argument("--min-unique", type=int, default=3,
@@ -120,6 +133,12 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
 
     pool, _report = load_pool(args.dk_salaries, args.projections)
+    pool = filter_availability(
+        pool,
+        exclude_injured=not args.include_injured,
+        require_confirmed_order=args.require_confirmed_order,
+        require_starting_pitcher=not args.allow_non_starting_pitchers,
+    )
     pool = apply_batting_order_filter(pool, args.max_batting_order)
     if pool.empty:
         print("[error] No players left after loading. Check that your projection names "
@@ -140,6 +159,7 @@ def main(argv=None):
         min_unique_players=args.min_unique,
         max_exposure=args.max_exposure,
         randomness=args.randomness,
+        stack_min_implied=args.stack_min_implied,
     )
 
     want = args.num_lineups

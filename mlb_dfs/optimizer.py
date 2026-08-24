@@ -10,6 +10,7 @@ import sys
 from dataclasses import dataclass, field
 
 import numpy as np
+import pandas as pd
 import pulp
 
 from .rules import (
@@ -71,6 +72,7 @@ class Constraints:
     min_unique_players: int = 3         # diversity between generated lineups
     max_exposure: float = 1.0           # max share of lineups any one player fills
     randomness: float = 0.0             # jitter projections to diversify a portfolio
+    stack_min_implied: float = None     # only stack teams with this Vegas run total
     enforce_dk_rules: bool = True       # 2-game minimum, 5-hitter team cap
 
 
@@ -101,6 +103,14 @@ class LineupBuilder:
         self.game_players = {}
         for i in self.idx:
             self.game_players.setdefault(self.game[i], []).append(i)
+
+        # Vegas implied run total per team, when the projections supply one.
+        self.team_implied = {}
+        if "implied_team_score" in pool.columns:
+            for i in self.hitters:
+                value = pool.at[i, "implied_team_score"]
+                if pd.notna(value):
+                    self.team_implied[self.team[i]] = float(value)
 
         self.name_to_idxs = {}
         for i in self.idx:
@@ -253,6 +263,16 @@ class LineupBuilder:
             if len(terms) >= c.stack_size:
                 eligible[team] = terms
 
+        # Vegas gate: don't stack an offense the market expects to be quiet.
+        if c.stack_min_implied is not None and self.team_implied:
+            gated = {t: terms for t, terms in eligible.items()
+                     if self.team_implied.get(t, float("nan")) >= c.stack_min_implied}
+            if gated:
+                eligible = gated
+            else:
+                print(f"[warn] no team meets --stack-min-implied "
+                      f"{c.stack_min_implied}; gate not applied.", file=sys.stderr)
+
         if c.stack_team:
             want = canonical_team(c.stack_team)
             if want not in eligible:
@@ -282,6 +302,14 @@ class LineupBuilder:
             terms = [used[i] for i in members if i in used]
             if len(terms) >= c.secondary_stack_size:
                 sec_eligible[t] = terms
+
+        # The Vegas gate covers the secondary stack too - "only stack teams
+        # above X" reads the same way for both halves of a double stack.
+        if c.stack_min_implied is not None and self.team_implied:
+            gated = {t: terms for t, terms in sec_eligible.items()
+                     if self.team_implied.get(t, float("nan")) >= c.stack_min_implied}
+            if len(gated) >= 2:
+                sec_eligible = gated
         if len(sec_eligible) < 2:
             print("[warn] not enough teams for a secondary stack; skipped.", file=sys.stderr)
             return
