@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Generated lineups / local slate data
+lineups.csv
+*_lineups.csv
+cash_lineup.csv
+summary.csv
+exposure.csv
+DKSalaries*.csv

@@ -1,0 +1,5 @@
+# PuLP 4.0 removes PULP_CBC_CMD and changes LpVariable construction; pin until
+# the model is migrated.
+pulp>=2.7,<4.0
+pandas>=1.5
+numpy>=1.23
